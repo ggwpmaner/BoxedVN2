@@ -1026,7 +1026,104 @@ final class AppModel: ObservableObject {
     /// runs on the interpreter with no DXMT - exactly one process per session
     /// is translated (docs/KNOWN_LIMITATIONS_IOS.md).
     func launchX64Program(_ program: ContainerX64Program,
-                          in container: WineContainer) {
+                      in container: WineContainer) {
+    guard let rootFilesystem else {
+        alertMessage = "No root filesystem is installed."
+        return
+    }
+
+    let is32BitProgram =
+        program.executable.architecture == Self.x86_32ArchitectureName
+
+    do {
+        // 32-bit PE: use the original 32-bit Wine path.
+        // This completely avoids Wine64/WoW64/FEX64 and therefore avoids
+        // the 16 KiB iOS native-identity address-space problem.
+        if is32BitProgram {
+            guard let writableRoot =
+                    ContainerLibrary.prefixRoot(for: container) else {
+                alertMessage = "Could not create the Wine prefix."
+                return
+            }
+
+            let files = ContainerLibrary.filesDirectory(for: container)
+
+            Log.write(
+                "Launching \(program.guestExecutablePath) through "
+                + "BoxedWine classic 32-bit Wine path; bypassing FEX64/Wine64",
+                category: "container"
+            )
+
+            try Session.launch(
+                rootFilesystem: rootFilesystem,
+                writableRoot: writableRoot,
+                gameDirectory: files,
+                sharedDirectory: Storage.sharedFiles,
+                executablePath: program.guestExecutablePath,
+                arguments: [],
+                environment: [],
+                workingDirectory: program.guestWorkingDirectory,
+                width: container.width,
+                height: container.height,
+                soundEnabled: Preferences.soundEnabled,
+                runThroughWine: true,
+                wineRenderer: Self.wineRenderer(for: container.renderer),
+                sharedDriveLetter:
+                    container.sharedDriveLetter.lowercased().first ?? "e",
+                windowsVersion: container.windowsVersion,
+                compatibilityDirectory: program.hostDirectory
+            )
+
+            rememberX64Program(program, for: container)
+            return
+        }
+
+        // 64-bit PE: keep the existing Wine64 + FEX64 + DXMT path.
+        guard let runtime = prepareX64Runtime(for: container) else {
+            return
+        }
+
+        rememberX64Program(program, for: container)
+
+        Log.write(
+            "Launching \(program.guestExecutablePath) through "
+            + "BoxedWine FEX and DXMT, working directory "
+            + program.guestWorkingDirectory,
+            category: "container"
+        )
+
+        try Session.launch(
+            rootFilesystem: rootFilesystem,
+            rootFilesystemOverlays: runtime.overlays,
+            writableRoot: runtime.writableRoot,
+            gameDirectory: runtime.files,
+            sharedDirectory: Storage.sharedFiles,
+            executablePath: program.guestExecutablePath,
+            arguments: [],
+            environment: X64Runtime.withVerboseTrace(
+                X64Runtime.environment,
+                enabled: Preferences.verboseWineTrace
+            ),
+            workingDirectory: program.guestWorkingDirectory,
+            width: container.width,
+            height: container.height,
+            soundEnabled: Preferences.soundEnabled,
+            runThroughWine: true,
+            useFEX64: true,
+            useDXMT: true,
+            winePrefixDriveC: runtime.driveC,
+            wineRenderer: BVNWineRendererAutomatic,
+            sharedDriveLetter:
+                container.sharedDriveLetter.lowercased().first ?? "e",
+            windowsVersion: container.windowsVersion,
+            compatibilityDirectory: program.hostDirectory,
+            dxmtModuleDirectory: runtime.guestWorkingDirectory
+        )
+    } catch {
+        alertMessage = "\(program.name) could not start: "
+            + error.localizedDescription
+    }
+} {
         guard let rootFilesystem else {
             alertMessage = "No root filesystem is installed."
             return
